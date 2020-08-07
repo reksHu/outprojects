@@ -1,0 +1,89 @@
+import logging
+import multiprocessing
+import os
+from typing import List
+
+# import tomtop
+from retrieval_nav_links import retrieval_links, save_links_to_db
+from tomtop.images_download import DowloadImages
+from retrieval_product_links import load_nav_links_data, RetrievalProductsNavigation
+from retrieval_products import RetrievalProducts
+from tomtop.db_helper import TableNames
+from tomtop.export_result import ExportResult
+from tomtop.logs.logger_helper import TomtopLogger
+
+
+class TomtopFactory(TomtopLogger):
+    def __init__(self):
+        super(TomtopFactory, self).__init__()
+        self.logger = logging.getLogger(__name__)
+
+    def parser_product(self, product_urls: List, index: int):
+        # print("parser_product:", product_urls)
+        self.logger.info(f"index:{index}, length of product_urls={len(product_urls)}, PID:{os.getpid()}")
+        prod_urls_table = f"{TableNames.PROD_URL_TABLE.value}_{str(index)}"
+        products_table = f"{TableNames.PROD_DATA_TABLE.value}_{str(index)}"
+        for first_nav_url in product_urls:
+            self.logger.info(f"正在抓取一级导航下的商品:{first_nav_url}")
+            self.logger.info(f"商品数据保存于: {products_table} 数据库中")
+            rpn = RetrievalProductsNavigation(prod_urls_table)
+            rpn.parse_products_navs(first_nav_url)
+
+            product_links = rpn.product_links
+
+            p = RetrievalProducts(product_links, products_table)
+            p.parse_product()
+
+        self.export_excels(products_table)
+
+
+    def generate_no_process(self):
+        sub_navigators_df = load_nav_links_data()
+        first_navs = []
+        for row in sub_navigators_df.iterrows():
+            index, url = row
+            first_navs.append(url["sub_nav_url"])
+            print(url["sub_nav_url"])
+
+        self.parser_product(first_navs, 1)
+
+    def generate_process(self):
+        sub_navigators_df = load_nav_links_data()
+        cpu_count = multiprocessing.cpu_count()
+        process_count = round(cpu_count * 0.6)
+        data = {}
+        for row in sub_navigators_df.iterrows():
+            index, url = row
+            print("generating url:", url["sub_nav_url"])
+            item = data.get(index % process_count, None)
+            if item is None:
+                data[index % process_count] = []
+
+            data[index % process_count].append(url["sub_nav_url"])
+
+        for index, key in enumerate(data.keys()):
+            print(len(data[key]))
+            p = multiprocessing.Process(target=self.parser_product, args=(data[key], index,))
+            p.start()
+
+    def export_excels(self, table_name: str):
+        try:
+            export = ExportResult(table_name)
+            export.read_data_and_export()
+            DowloadImages().dowload_images(table_name)
+        except Exception as e:
+            self.logger.error("export execls error occured.")
+            self.logger.exception(e)
+
+
+if __name__ == '__main__':
+    # 获取一级和二级导航，并保存到数据库
+    links_result: List = retrieval_links()
+    save_links_to_db(links_result)
+
+    # generate_process()
+    factory = TomtopFactory()
+    factory.generate_no_process()
+
+    # factory.export_excels("products_1")
+    # DowloadImages().get_images("products_1")
